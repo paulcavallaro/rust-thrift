@@ -4,6 +4,7 @@ use mio::buf::{ByteBuf, MutByteBuf};
 use mio::util::Slab;
 use std::io::{Result, Error, ErrorKind};
 
+#[derive(Clone)]
 pub struct ServerConfig {
     timeout_ms : u64,
 }
@@ -28,11 +29,12 @@ pub struct MioConn {
     mut_buf: Option<MutByteBuf>,
     token: Option<Token>,
     interest: EventSet,
-    timeout : Option<Timeout>,
+    timeout: Option<Timeout>,
+    config: ServerConfig,
 }
 
 impl MioConn {
-    pub fn new(sock: TcpStream) -> MioConn {
+    pub fn new(sock: TcpStream, config: ServerConfig) -> MioConn {
         MioConn {
             sock: sock,
             buf: None,
@@ -40,6 +42,7 @@ impl MioConn {
             token: None,
             interest: EventSet::hup(),
             timeout: None,
+            config: config,
         }
     }
 
@@ -49,7 +52,7 @@ impl MioConn {
 
     fn set_timeout(&mut self, event_loop: &mut EventLoop<MioServer>) {
         // TODO(ptc) handle timeouts and server configuration management better
-        let timeout = event_loop.timeout_ms(self.token.unwrap(), ServerConfig::default().timeout_ms).ok().expect("Should have set a timeout");
+        let timeout = event_loop.timeout_ms(self.token.unwrap(), self.config.timeout_ms).ok().expect("Should have set a timeout");
         self.timeout = Some(timeout);
     }
 
@@ -189,7 +192,7 @@ impl MioServer {
         let res = try!(self.sock.accept());
         let sock = try!(res.ok_or(Error::new(ErrorKind::WouldBlock,
                                              "Accepting would block")));
-        let conn = MioConn::new(sock);
+        let conn = MioConn::new(sock, self.config.clone());
         // TODO(ptc) proper error handling...
         let tok = self.conns.insert(conn)
             .ok().expect("could not add connection to slab");
@@ -199,14 +202,17 @@ impl MioServer {
         event_loop.register_opt(&self.conns[tok].sock, tok, EventSet::readable() | EventSet::hup(), PollOpt::edge() | PollOpt::oneshot())
             .ok().expect("could not register socket with event loop");
         // TODO(ptc) proper error handling...
-        let timeout = event_loop.timeout_ms(tok, self.config.timeout_ms).ok().expect("Should have set a timeout");
-        self.conns[tok].timeout = Some(timeout);
+        self.conns[tok].set_timeout(event_loop);
 
         Ok(())
     }
 
     /// Handle when a connection is readable
     fn conn_readable(&mut self, event_loop: &mut EventLoop<Self>, tok: Token) -> Result<()> {
+        // TODO(ptc) might not be enough to just see if None, because the connection
+        // could close/timeout and we might remove the conn from the slab, but then
+        // reallocate the token from the slab, and incorrectly assume old events are
+        // for the new conn
         match self.conns.get_mut(tok) {
             // Events delivered for already closed connection
             None => Ok(()),
