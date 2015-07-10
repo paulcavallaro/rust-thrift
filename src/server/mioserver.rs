@@ -1,8 +1,7 @@
 use mio::*;
 use mio::tcp::*;
-use mio::buf::{ByteBuf, MutByteBuf, SliceBuf};
+use mio::buf::{ByteBuf, MutByteBuf};
 use mio::util::Slab;
-use std::thread;
 use std::io;
 
 pub struct MioServer {
@@ -36,11 +35,11 @@ impl MioConn {
             Ok(None) => {
                 panic!("We just got readable, but were unable to read from the socket?");
             }
-            Ok(Some(r)) => {
+            Ok(Some(_r)) => {
                 self.interest.remove(EventSet::readable());
                 self.interest.insert(EventSet::writable());
             }
-            Err(e) => {
+            Err(_e) => {
                 self.interest.remove(EventSet::readable());
             }
         };
@@ -58,13 +57,13 @@ impl MioConn {
                 self.buf = Some(buf);
                 self.interest.insert(EventSet::writable());
             }
-            Ok(Some(r)) => {
+            Ok(Some(_r)) => {
                 self.mut_buf = Some(buf.flip());
 
                 self.interest.insert(EventSet::readable());
                 self.interest.remove(EventSet::writable());
             }
-            Err(e) => {
+            Err(_e) => {
                 // TODO(ptc) handle error
                 ()
             },
@@ -101,10 +100,10 @@ impl Handler for MioServer {
         }
     }
 
-    fn notify(&mut self, event_loop: &mut EventLoop<Self>, msg: Self::Message) {
+    fn notify(&mut self, _event_loop: &mut EventLoop<Self>, _msg: Self::Message) {
     }
 
-    fn timeout(&mut self, event_loop: &mut EventLoop<Self>, msg: Self::Timeout) {
+    fn timeout(&mut self, _event_loop: &mut EventLoop<Self>, _msg: Self::Timeout) {
     }
 }
 
@@ -150,7 +149,7 @@ impl MioServer {
 }
 
   pub fn run(&mut self, event_loop : &mut EventLoop<Self>) {
-      event_loop.register_opt(&self.sock, SERVER, EventSet::readable(), PollOpt::edge());
-      event_loop.run(self);
+      event_loop.register_opt(&self.sock, SERVER, EventSet::readable(), PollOpt::edge()).ok().expect("Unable to register server socket with event loop");
+      event_loop.run(self).ok();
   }
 }
