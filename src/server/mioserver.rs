@@ -4,9 +4,22 @@ use mio::buf::{ByteBuf, MutByteBuf};
 use mio::util::Slab;
 use std::io::{Result, Error, ErrorKind};
 
+pub struct ServerConfig {
+    timeout_ms : u64,
+}
+
+impl ServerConfig {
+    pub fn default() -> ServerConfig {
+        ServerConfig {
+            timeout_ms : 5000,
+        }
+    }
+}
+
 pub struct MioServer {
     sock: TcpListener,
     conns: Slab<MioConn>,
+    config : ServerConfig,
 }
 
 pub struct MioConn {
@@ -15,6 +28,7 @@ pub struct MioConn {
     mut_buf: Option<MutByteBuf>,
     token: Option<Token>,
     interest: EventSet,
+    timeout : Option<Timeout>,
 }
 
 impl MioConn {
@@ -25,14 +39,34 @@ impl MioConn {
             mut_buf: Some(ByteBuf::mut_with_capacity(2048)),
             token: None,
             interest: EventSet::hup(),
+            timeout: None,
         }
     }
 
-    fn closed(&self, event_loop: &mut EventLoop<MioServer>) -> Result<()> {
-        event_loop.deregister(&self.sock)
+    fn clear_timeout(&self, event_loop: &mut EventLoop<MioServer>) {
+        self.timeout.map(|timeout| event_loop.clear_timeout(timeout));
     }
 
+    fn set_timeout(&mut self, event_loop: &mut EventLoop<MioServer>) {
+        // TODO(ptc) handle timeouts and server configuration management better
+        let timeout = event_loop.timeout_ms(self.token.unwrap(), ServerConfig::default().timeout_ms).ok().expect("Should have set a timeout");
+        self.timeout = Some(timeout);
+    }
+
+    /// Called when connection has timed out
+    fn timeout(&mut self, _event_loop: &mut EventLoop<MioServer>) -> Result<()> {
+        Ok(())
+    }
+
+    /// Called when connection has been closed/hung up
+    fn closed(&self, event_loop: &mut EventLoop<MioServer>) -> Result<()> {
+        self.clear_timeout(event_loop);
+        Ok(())
+    }
+
+    /// Called when connection has data to be read
     fn readable(&mut self, event_loop: &mut EventLoop<MioServer>) -> Result<()> {
+        self.clear_timeout(event_loop);
         let mut buf = self.mut_buf.take().unwrap();
 
         match self.sock.try_read_buf(&mut buf) {
@@ -50,10 +84,14 @@ impl MioConn {
 
         // prepare to provide this to writable
         self.buf = Some(buf.flip());
-        event_loop.reregister(&self.sock, self.token.unwrap(), self.interest, PollOpt::edge() | PollOpt::oneshot())
+        try!(event_loop.reregister(&self.sock, self.token.unwrap(), self.interest, PollOpt::edge() | PollOpt::oneshot()));
+        self.set_timeout(event_loop);
+        Ok(())
     }
 
+    /// Called when connection can be written to
     fn writable(&mut self, event_loop: &mut EventLoop<MioServer>) -> Result<()> {
+        self.clear_timeout(event_loop);
         let mut buf = self.buf.take().unwrap();
 
         match self.sock.try_write_buf(&mut buf) {
@@ -73,14 +111,16 @@ impl MioConn {
             },
         }
 
-        event_loop.reregister(&self.sock, self.token.unwrap(), self.interest, PollOpt::edge() | PollOpt::oneshot())
+        try!(event_loop.reregister(&self.sock, self.token.unwrap(), self.interest, PollOpt::edge() | PollOpt::oneshot()));
+        self.set_timeout(event_loop);
+        Ok(())
     }
 }
 
 const SERVER: Token = Token(0);
 
 impl Handler for MioServer {
-    type Timeout = MioConn;
+    type Timeout = Token;
     type Message = (); // TODO(ptc) Figure out Message type from workers
 
     fn ready(&mut self, event_loop: &mut EventLoop<Self>, token: Token,
@@ -122,7 +162,15 @@ impl Handler for MioServer {
     fn notify(&mut self, _event_loop: &mut EventLoop<Self>, _msg: Self::Message) {
     }
 
-    fn timeout(&mut self, _event_loop: &mut EventLoop<Self>, _msg: Self::Timeout) {
+    fn timeout(&mut self, event_loop: &mut EventLoop<Self>, token: Self::Timeout) {
+        // Connection associated with token has timed out on its last action
+        match token {
+            SERVER => panic!("Never specified a timeout on the SERVER socket!"),
+            conn => {
+                println!("Timeout on connection {:?}", token);
+                let _ = self.conn_timeout(event_loop, conn);
+            },
+        }
     }
 }
 
@@ -132,6 +180,7 @@ impl MioServer {
         MioServer {
             sock : sock,
             conns : Slab::new_starting_at(Token(SERVER.as_usize() + 1), 1024),
+            config : ServerConfig::default(),
         }
     }
 
@@ -146,10 +195,12 @@ impl MioServer {
             .ok().expect("could not add connection to slab");
 
         // Register the connection
-        // TODO(ptc) need a timeout on the connection handshake...
         self.conns[tok].token = Some(tok);
         event_loop.register_opt(&self.conns[tok].sock, tok, EventSet::readable() | EventSet::hup(), PollOpt::edge() | PollOpt::oneshot())
             .ok().expect("could not register socket with event loop");
+        // TODO(ptc) proper error handling...
+        let timeout = event_loop.timeout_ms(tok, self.config.timeout_ms).ok().expect("Should have set a timeout");
+        self.conns[tok].timeout = Some(timeout);
 
         Ok(())
     }
@@ -183,8 +234,19 @@ impl MioServer {
         res
     }
 
+    /// Handle when a connection is hung up/closes
+    fn conn_timeout(&mut self, event_loop: &mut EventLoop<Self>, tok: Token) -> Result<()> {
+        let res = match self.conns.get_mut(tok) {
+            // Events delivered for already closed connection
+            None => Ok(()),
+            Some(conn) => conn.timeout(event_loop),
+        };
+        self.conns.remove(tok);
+        res
+    }
+
     pub fn run(&mut self, event_loop : &mut EventLoop<Self>) {
         event_loop.register_opt(&self.sock, SERVER, EventSet::readable(), PollOpt::edge()).ok().expect("Unable to register server socket with event loop");
-        event_loop.run(self).ok();
+        event_loop.run(self).ok().expect("Couldn't run the event loop");
     }
 }
