@@ -133,7 +133,7 @@ impl Handler for MioServer {
         if events.is_readable() {
             match token {
                 SERVER => {
-                    let _ = self.accept(event_loop);
+                    self.accept(event_loop).err().map(|e| println!("Error accepting: {:?}", e));
                 }
                 conn => {
                     let _ = self.conn_readable(event_loop, conn);
@@ -193,9 +193,8 @@ impl MioServer {
         let sock = try!(res.ok_or(Error::new(ErrorKind::WouldBlock,
                                              "Accepting would block")));
         let conn = MioConn::new(sock, self.config.clone());
-        // TODO(ptc) proper error handling...
-        let tok = self.conns.insert(conn)
-            .ok().expect("could not add connection to slab");
+        // Drop the connection on the floor if we can't allocate from the slab
+        let tok = try!(self.conns.insert(conn).map_err(|_drop_conn| Error::new(ErrorKind::Other, "Exhausted connections in slab")));
 
         // Register the connection
         self.conns[tok].token = Some(tok);
