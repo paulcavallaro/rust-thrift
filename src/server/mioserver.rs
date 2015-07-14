@@ -68,8 +68,7 @@ impl MioConn {
         Ok(())
     }
 
-    fn is_done_reading(&self, buf : &[u8]) -> bool {
-        println!("buf: {:?}", str::from_utf8(&buf[..100]).ok().expect("oops"));
+    fn is_done_reading(&self, buf : &[u8], len : usize) -> bool {
         str::from_utf8(buf).ok().expect("oops").contains("\r\n\r\n")
     }
 
@@ -83,7 +82,7 @@ impl MioConn {
                 panic!("We just got readable, but were unable to read from the socket?");
             }
             Ok(Some(read)) => {
-                if self.is_done_reading(&buf) {
+                if self.is_done_reading(&buf, read) {
                     self.interest.remove(EventSet::readable());
                     self.interest.insert(EventSet::writable());
                 }
@@ -94,7 +93,7 @@ impl MioConn {
             }
         };
 
-        try!(event_loop.reregister(&self.sock, self.token.unwrap(), self.interest, PollOpt::edge() | PollOpt::oneshot()));
+        event_loop.reregister(&self.sock, self.token.unwrap(), self.interest, PollOpt::edge() | PollOpt::oneshot()).ok().expect("Should have reregistered in readable");
         self.set_timeout(event_loop);
         Ok(ConnState::Open)
     }
@@ -111,23 +110,22 @@ impl MioConn {
         match self.sock.try_write(msg.as_bytes()) {
             Ok(None) => {
                 // Writing would block...
-                println!("Writing would block...");
+                println!("Writing would block... {:?}", self.token.unwrap());
             }
             Ok(Some(_wrote)) => {
                 // Wrote response to client
                 if self.is_done_writing() {
-                    println!("Done writing...");
                     return Ok(ConnState::Closed)
                 }
             }
             Err(_e) => {
                 // TODO(ptc) handle error
-                println!("Error writing msg...");
+                println!("Error writing msg... {:?}", self.token.unwrap());
                 ()
             },
         }
 
-        try!(event_loop.reregister(&self.sock, self.token.unwrap(), self.interest, PollOpt::edge() | PollOpt::oneshot()));
+        event_loop.reregister(&self.sock, self.token.unwrap(), self.interest, PollOpt::edge() | PollOpt::oneshot()).ok().expect("Shoulda reregistered in writable");
         self.set_timeout(event_loop);
         Ok(ConnState::Open)
     }
@@ -149,7 +147,6 @@ impl Handler for MioServer {
                     self.accept(event_loop).err().map(|e| println!("Error accepting: {:?}", e));
                 }
                 conn => {
-                    println!("conn_readable for token: {:?}", token);
                     self.conn_readable(event_loop, conn).ok().expect("Should have read");
                 }
             }
@@ -158,10 +155,9 @@ impl Handler for MioServer {
         if events.is_writable() {
             match token {
                 SERVER => {
-                    println!("received writable for SERVER events: '{:?}' token: '{:?}'", events, token);
+                    panic!("received writable for SERVER events: '{:?}' token: '{:?}'", events, token);
                 },
                 conn => {
-                    println!("conn_writable for token: {:?}", token);
                     self.conn_writable(event_loop, conn).ok().expect("Should have written");
                 },
             }
@@ -171,7 +167,6 @@ impl Handler for MioServer {
             match token {
                 SERVER => panic!("listening socket closed underneath us!"),
                 conn => {
-                    println!("conn_closed for token: {:?}", token);
                     self.conn_closed(event_loop, conn).ok().expect("Should have closed");
                 },
             }
@@ -182,7 +177,7 @@ impl Handler for MioServer {
                 SERVER => panic!("got error event for SERVER: '{:?}'", events),
                 conn => {
                     println!("Got error for token: {:?}", conn);
-                    self.conns.remove(conn);
+                    self.conns.remove(conn).expect("error should remove");
                 },
             }
         }
@@ -221,7 +216,6 @@ impl MioServer {
         let conn = MioConn::new(sock, self.config.clone());
         // Drop the connection on the floor if we can't allocate from the slab
         let tok = try!(self.conns.insert(conn).map_err(|_drop_conn| Error::new(ErrorKind::Other, "Exhausted connections in slab")));
-        println!("New connection issued token: {:?}", tok);
 
         // Register the connection
         self.conns[tok].token = Some(tok);
@@ -243,14 +237,13 @@ impl MioServer {
             // Events delivered for already closed connection
             None => {
                 println!("conn_readable: for missing token: {:?}", tok);
-                return Ok(())
+                return Ok(());
             },
             Some(conn) => conn.readable(event_loop),
         };
         match res {
             Ok(ConnState::Closed) => {
-                println!("conn_readable: ConnState::Closed for token: {:?}", tok);
-                self.conns.remove(tok);
+                self.conns.remove(tok).expect("Should still be there");
                 Ok(())
             },
             Ok(ConnState::Open) => Ok(()),
@@ -267,14 +260,13 @@ impl MioServer {
             // Events delivered for already closed connection
             None => {
                 println!("conn_writable: for missing token: {:?}", tok);
-                return Ok(())
+                return Ok(());
             },
             Some(conn) => conn.writable(event_loop),
         };
         match res {
             Ok(ConnState::Closed) => {
-                println!("conn_writable: ConnState::Closed for token: {:?}", tok);
-                self.conns.remove(tok);
+                self.conns.remove(tok).expect("Should be removed");
                 Ok(())
             },
             Ok(ConnState::Open) => Ok(()),
@@ -288,11 +280,11 @@ impl MioServer {
             // Events delivered for already closed connection
             None => {
                 println!("conn_closed: for missing token: {:?}", tok);
-                return Ok(())
+                return Ok(());
             },
             Some(conn) => conn.closed(event_loop),
         };
-        self.conns.remove(tok);
+        self.conns.remove(tok).expect("Should be removed in closed");
         res
     }
 
@@ -302,16 +294,16 @@ impl MioServer {
             // Events delivered for already closed connection
             None => {
                 println!("conn_timeout: for missing token: {:?}", tok);
-                return Ok(())
+                return Ok(());
             },
             Some(conn) => conn.timeout(event_loop),
         };
-        self.conns.remove(tok);
+        self.conns.remove(tok).expect("Timeout removal should work");
         res
     }
 
     pub fn run(&mut self, event_loop : &mut EventLoop<Self>) {
-        event_loop.register_opt(&self.sock, SERVER, EventSet::readable(), PollOpt::edge()).ok().expect("Unable to register server socket with event loop");
+        event_loop.register_opt(&self.sock, SERVER, EventSet::readable() | EventSet::hup() | EventSet::error(), PollOpt::level()).ok().expect("Unable to register server socket with event loop");
         event_loop.run(self).ok().expect("Couldn't run the event loop");
     }
 }
