@@ -5,4 +5,5 @@ version = "0.0.1"
 authors = ["Paul Cavallaro <paulcavallaro@gmail.com>"]
 
 [dependencies.mio]
-git = "https://github.com/carllerche/mio"
+git = "https://github.com/paulcavallaro/mio"
+branch = "use-ptc-bytes"

@@ -1,4 +1,5 @@
 use mio::*;
+use mio::buf::{ByteBuf, MutByteBuf};
 use mio::tcp::*;
 use mio::util::Slab;
 use std::io::{Result, Error, ErrorKind};
@@ -23,7 +24,7 @@ enum ConnState {
 }
 
 pub struct MioServer {
-    sock: TcpListener,
+    listener: TcpListener,
     conns: Slab<MioConn>,
     config : ServerConfig,
 }
@@ -32,6 +33,7 @@ pub struct MioConn {
     sock: TcpStream,
     token: Option<Token>,
     interest: EventSet,
+    mut_buf : MutByteBuf,
     timeout: Option<Timeout>,
     config: ServerConfig,
 }
@@ -42,6 +44,7 @@ impl MioConn {
             sock: sock,
             token: None,
             interest: EventSet::hup() | EventSet::error(),
+            mut_buf : ByteBuf::mut_with_capacity(1024),
             timeout: None,
             config: config,
         }
@@ -68,23 +71,27 @@ impl MioConn {
         Ok(())
     }
 
-    fn is_done_reading(&self, buf : &[u8], len : usize) -> bool {
-        str::from_utf8(buf).ok().expect("oops").contains("\r\n\r\n")
+    fn is_done_reading(&self, bytes_read : usize) -> bool {
+        bytes_read > 0 && str::from_utf8(self.mut_buf.bytes()).ok().expect("oops").contains("\r\n\r\n")
     }
 
     /// Called when connection has data to be read
     fn readable(&mut self, event_loop: &mut EventLoop<MioServer>) -> Result<ConnState> {
-        self.clear_timeout(event_loop);
-        let mut buf = [0; 2048];
-
-        match self.sock.try_read(&mut buf) {
+        match self.sock.try_read_buf(&mut self.mut_buf) {
             Ok(None) => {
                 panic!("We just got readable, but were unable to read from the socket?");
             }
             Ok(Some(read)) => {
-                if self.is_done_reading(&buf, read) {
+                if self.is_done_reading(read) {
+                    self.clear_timeout(event_loop);
+                    self.set_timeout(event_loop);
                     self.interest.remove(EventSet::readable());
                     self.interest.insert(EventSet::writable());
+                } else if read == 0 {
+                    println!("EOF read: {}, self.interest: {:?}", read, self.interest);
+                    return Ok(ConnState::Open);
+                } else {
+                    println!("Didn't read whole buffer!! read: {}, self.interest: {:?}", read, self.interest);
                 }
             }
             Err(e) => {
@@ -94,17 +101,11 @@ impl MioConn {
         };
 
         event_loop.reregister(&self.sock, self.token.unwrap(), self.interest, PollOpt::edge() | PollOpt::oneshot()).ok().expect("Should have reregistered in readable");
-        self.set_timeout(event_loop);
         Ok(ConnState::Open)
-    }
-
-    fn is_done_writing(&self) -> bool {
-        true
     }
 
     /// Called when connection can be written to
     fn writable(&mut self, event_loop: &mut EventLoop<MioServer>) -> Result<ConnState> {
-        self.clear_timeout(event_loop);
         let msg = "HTTP/1.1 200 OK\r\n<h1>200 Ok</h1>";
 
         match self.sock.try_write(msg.as_bytes()) {
@@ -112,10 +113,13 @@ impl MioConn {
                 // Writing would block...
                 println!("Writing would block... {:?}", self.token.unwrap());
             }
-            Ok(Some(_wrote)) => {
+            Ok(Some(wrote)) => {
                 // Wrote response to client
-                if self.is_done_writing() {
+                if wrote == msg.len() {
+                    self.clear_timeout(event_loop);
                     return Ok(ConnState::Closed)
+                } else {
+                    println!("Didn't write whole msg!");
                 }
             }
             Err(_e) => {
@@ -126,7 +130,6 @@ impl MioConn {
         }
 
         event_loop.reregister(&self.sock, self.token.unwrap(), self.interest, PollOpt::edge() | PollOpt::oneshot()).ok().expect("Shoulda reregistered in writable");
-        self.set_timeout(event_loop);
         Ok(ConnState::Open)
     }
 }
@@ -144,7 +147,7 @@ impl Handler for MioServer {
         if events.is_readable() {
             match token {
                 SERVER => {
-                    self.accept(event_loop).err().map(|e| println!("Error accepting: {:?}", e));
+                    self.accept_all(event_loop);
                 }
                 conn => {
                     self.conn_readable(event_loop, conn).ok().expect("Should have read");
@@ -183,7 +186,12 @@ impl Handler for MioServer {
         }
     }
 
-    fn notify(&mut self, _event_loop: &mut EventLoop<Self>, _msg: Self::Message) {
+    fn notify(&mut self, event_loop: &mut EventLoop<Self>, _msg: Self::Message) {
+        println!("HandlerInfo: #Conns: {} #Remaining: {}",
+                 self.conns.count(), self.conns.remaining());
+        for conn in self.conns.iter() {
+            println!("conn tok:{:?} sock:{:?} interest:{:?} has_timeout:{}", conn.token.unwrap(), conn.sock, conn.interest, conn.timeout.is_some());
+        }
     }
 
     fn timeout(&mut self, event_loop: &mut EventLoop<Self>, token: Self::Timeout) {
@@ -200,17 +208,34 @@ impl Handler for MioServer {
 
 impl MioServer {
 
-    pub fn new(sock: TcpListener) -> MioServer {
+    pub fn new(listener: TcpListener) -> MioServer {
         MioServer {
-            sock : sock,
+            listener : listener,
             conns : Slab::new_starting_at(Token(SERVER.as_usize() + 1), 1024),
             config : ServerConfig::default(),
         }
     }
 
+    fn accept_all(&mut self, event_loop : &mut EventLoop<Self>) {
+        let mut res = self.accept(event_loop).err().map(|e| {
+            if e.kind() != ErrorKind::WouldBlock {
+                println!("Error accepting: {:?}", e);
+            }
+            e
+        });
+        while res.is_none() {
+            res = self.accept(event_loop).err().map(|e| {
+                if e.kind() != ErrorKind::WouldBlock {
+                    println!("Error accepting: {:?}", e);
+                }
+                e
+            });
+        }
+    }
+
     /// Accept a pending connection on the listening socket
     pub fn accept(&mut self, event_loop: &mut EventLoop<Self>) -> Result<()> {
-        let res = try!(self.sock.accept());
+        let res = try!(self.listener.accept());
         let sock = try!(res.ok_or(Error::new(ErrorKind::WouldBlock,
                                              "Accepting would block")));
         let conn = MioConn::new(sock, self.config.clone());
@@ -303,7 +328,7 @@ impl MioServer {
     }
 
     pub fn run(&mut self, event_loop : &mut EventLoop<Self>) {
-        event_loop.register_opt(&self.sock, SERVER, EventSet::readable() | EventSet::hup() | EventSet::error(), PollOpt::level()).ok().expect("Unable to register server socket with event loop");
+        event_loop.register_opt(&self.listener, SERVER, EventSet::readable() | EventSet::hup() | EventSet::error(), PollOpt::level()).ok().expect("Unable to register server socket with event loop");
         event_loop.run(self).ok().expect("Couldn't run the event loop");
     }
 }
