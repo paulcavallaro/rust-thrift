@@ -43,7 +43,7 @@ impl MioConn {
         MioConn {
             sock: sock,
             token: None,
-            interest: EventSet::hup() | EventSet::error(),
+            interest: EventSet::readable() | EventSet::hup() | EventSet::error(),
             mut_buf : ByteBuf::mut_with_capacity(1024),
             timeout: None,
             config: config,
@@ -51,7 +51,8 @@ impl MioConn {
     }
 
     fn clear_timeout(&self, event_loop: &mut EventLoop<MioServer>) {
-        self.timeout.map(|timeout| event_loop.clear_timeout(timeout));
+        self.timeout.map(|timeout| assert!(event_loop.clear_timeout(timeout),
+                                           "Should have cleared an actual timeout"));
     }
 
     fn set_timeout(&mut self, event_loop: &mut EventLoop<MioServer>) {
@@ -189,9 +190,6 @@ impl Handler for MioServer {
     fn notify(&mut self, event_loop: &mut EventLoop<Self>, _msg: Self::Message) {
         println!("HandlerInfo: #Conns: {} #Remaining: {}",
                  self.conns.count(), self.conns.remaining());
-        for conn in self.conns.iter() {
-            println!("conn tok:{:?} sock:{:?} interest:{:?} has_timeout:{}", conn.token.unwrap(), conn.sock, conn.interest, conn.timeout.is_some());
-        }
     }
 
     fn timeout(&mut self, event_loop: &mut EventLoop<Self>, token: Self::Timeout) {
