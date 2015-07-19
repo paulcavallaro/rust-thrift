@@ -89,7 +89,7 @@ impl MioConn {
                     self.interest.remove(EventSet::readable());
                     self.interest.insert(EventSet::writable());
                 } else if read == 0 {
-                    println!("EOF read: {}, self.interest: {:?}", read, self.interest);
+                    // Don't reregister for events on a closed connection
                     return Ok(ConnState::Open);
                 } else {
                     println!("Didn't read whole buffer!! read: {}, self.interest: {:?}", read, self.interest);
