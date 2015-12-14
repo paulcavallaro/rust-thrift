@@ -1,5 +1,5 @@
+use bytes::{ByteBuf, MutByteBuf};
 use mio::*;
-use mio::buf::{ByteBuf, MutByteBuf};
 use mio::tcp::*;
 use mio::util::Slab;
 use std::io::{Result, Error, ErrorKind};
@@ -39,6 +39,7 @@ pub struct MioConn {
 }
 
 impl MioConn {
+
     pub fn new(sock: TcpStream, config: ServerConfig) -> MioConn {
         MioConn {
             sock: sock,
@@ -234,15 +235,15 @@ impl MioServer {
     /// Accept a pending connection on the listening socket
     pub fn accept(&mut self, event_loop: &mut EventLoop<Self>) -> Result<()> {
         let res = try!(self.listener.accept());
-        let sock = try!(res.ok_or(Error::new(ErrorKind::WouldBlock,
-                                             "Accepting would block")));
+        let (sock, addr) = try!(res.ok_or(Error::new(ErrorKind::WouldBlock,
+                                                     "Accepting would block")));
         let conn = MioConn::new(sock, self.config.clone());
         // Drop the connection on the floor if we can't allocate from the slab
         let tok = try!(self.conns.insert(conn).map_err(|_drop_conn| Error::new(ErrorKind::Other, "Exhausted connections in slab")));
 
         // Register the connection
         self.conns[tok].token = Some(tok);
-        event_loop.register_opt(&self.conns[tok].sock, tok, EventSet::readable() | EventSet::hup() | EventSet::error(), PollOpt::edge() | PollOpt::oneshot())
+        event_loop.register(&self.conns[tok].sock, tok, EventSet::readable() | EventSet::hup() | EventSet::error(), PollOpt::edge() | PollOpt::oneshot())
             .ok().expect("could not register socket with event loop");
         // TODO(ptc) proper error handling...
         self.conns[tok].set_timeout(event_loop);
@@ -326,7 +327,7 @@ impl MioServer {
     }
 
     pub fn run(&mut self, event_loop : &mut EventLoop<Self>) {
-        event_loop.register_opt(&self.listener, SERVER, EventSet::readable() | EventSet::hup() | EventSet::error(), PollOpt::level()).ok().expect("Unable to register server socket with event loop");
+        event_loop.register(&self.listener, SERVER, EventSet::readable() | EventSet::hup() | EventSet::error(), PollOpt::level()).ok().expect("Unable to register server socket with event loop");
         event_loop.run(self).ok().expect("Couldn't run the event loop");
     }
 }

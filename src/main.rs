@@ -1,3 +1,4 @@
+extern crate bytes;
 extern crate mio;
 
 mod server;
@@ -8,13 +9,9 @@ use server::mioserver::*;
 use std::thread;
 
 fn main() {
-    let addr = "127.0.0.1:8088".parse().ok().expect("Couldn't parse address");
-
     // Setup the server socket
-    let sock = TcpSocket::v4().ok().expect("Couldn't create socket");
-    sock.set_reuseaddr(true).ok().expect("Couldn't set SO_REUSEADDR");
-    sock.bind(&addr).ok().expect("Couldn't bind to address");
-    let listener = sock.listen(2048).ok().expect("Couldn't bind to address");
+    let addr = "127.0.0.1:8088".parse().ok().expect("Couldn't parse address");
+    let listener = TcpListener::bind(&addr).ok().expect("Couldn't bind to address");
 
     // Create an event loop
     let mut event_loop = EventLoop::new().ok().expect("Couldn't create EventLoop");

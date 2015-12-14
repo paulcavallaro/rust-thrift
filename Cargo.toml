@@ -4,6 +4,6 @@ name = "rust-thrift"
 version = "0.0.1"
 authors = ["Paul Cavallaro <paulcavallaro@gmail.com>"]
 
-[dependencies.mio]
-git = "https://github.com/paulcavallaro/mio"
-branch = "use-ptc-bytes"
+[dependencies]
+mio = "0.5"
+bytes = "*"
