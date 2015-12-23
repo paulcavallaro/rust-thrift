@@ -64,13 +64,12 @@ impl MioConn {
 
     /// Called when connection has timed out
     fn timeout(&mut self, _event_loop: &mut EventLoop<MioServer>) -> Result<()> {
-        Ok(())
+        self.sock.shutdown(Shutdown::Both)
     }
 
     /// Called when connection has been closed/hung up
-    fn closed(&self, event_loop: &mut EventLoop<MioServer>) -> Result<()> {
+    fn closed(&self, event_loop: &mut EventLoop<MioServer>) -> () {
         self.clear_timeout(event_loop);
-        Ok(())
     }
 
     fn is_done_reading(&self, bytes_read : usize) -> bool {
@@ -108,7 +107,10 @@ impl MioConn {
 
     /// Called when connection can be written to
     fn writable(&mut self, event_loop: &mut EventLoop<MioServer>) -> Result<ConnState> {
-        let msg = "HTTP/1.1 200 OK\r\n<h1>200 Ok</h1>";
+        let body = "<h1> Hello World! </h1>";
+        let header = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+                             body.as_bytes().len());
+        let msg = header + body;
 
         match self.sock.try_write(msg.as_bytes()) {
             Ok(None) => {
@@ -188,7 +190,7 @@ impl Handler for MioServer {
         }
     }
 
-    fn notify(&mut self, event_loop: &mut EventLoop<Self>, _msg: Self::Message) {
+    fn notify(&mut self, _event_loop: &mut EventLoop<Self>, _msg: Self::Message) {
         println!("HandlerInfo: #Conns: {} #Remaining: {}",
                  self.conns.count(), self.conns.remaining());
     }
@@ -235,8 +237,8 @@ impl MioServer {
     /// Accept a pending connection on the listening socket
     pub fn accept(&mut self, event_loop: &mut EventLoop<Self>) -> Result<()> {
         let res = try!(self.listener.accept());
-        let (sock, addr) = try!(res.ok_or(Error::new(ErrorKind::WouldBlock,
-                                                     "Accepting would block")));
+        let (sock, _addr) = try!(res.ok_or(Error::new(ErrorKind::WouldBlock,
+                                                      "Accepting would block")));
         let conn = MioConn::new(sock, self.config.clone());
         // Drop the connection on the floor if we can't allocate from the slab
         let tok = try!(self.conns.insert(conn).map_err(|_drop_conn| Error::new(ErrorKind::Other, "Exhausted connections in slab")));
@@ -304,9 +306,12 @@ impl MioServer {
             // Events delivered for already closed connection
             None => {
                 println!("conn_closed: for missing token: {:?}", tok);
-                return Ok(());
+                Ok(())
             },
-            Some(conn) => conn.closed(event_loop),
+            Some(conn) => {
+                conn.closed(event_loop);
+                Ok(())
+            }
         };
         self.conns.remove(tok).expect("Should be removed in closed");
         res
@@ -320,10 +325,12 @@ impl MioServer {
                 println!("conn_timeout: for missing token: {:?}", tok);
                 return Ok(());
             },
-            Some(conn) => conn.timeout(event_loop),
+            Some(conn) => {
+                conn.timeout(event_loop)
+            }
         };
         self.conns.remove(tok).expect("Timeout removal should work");
-        res
+        return res;
     }
 
     pub fn run(&mut self, event_loop : &mut EventLoop<Self>) {
